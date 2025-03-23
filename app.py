@@ -5,6 +5,9 @@ import subprocess
 import requests
 import re
 import shutil
+import random
+import time
+from functools import wraps
 
 app = Flask(__name__)
 
@@ -12,6 +15,35 @@ app = Flask(__name__)
 DOWNLOAD_FOLDER = './downloads'
 if not os.path.exists(DOWNLOAD_FOLDER):
     os.makedirs(DOWNLOAD_FOLDER)
+
+# 用戶代理列表
+USER_AGENTS = [
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:123.0) Gecko/20100101 Firefox/123.0',
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.3.1 Safari/605.1.15'
+]
+
+def retry_on_error(max_retries=3, delay=1):
+    def decorator(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            retries = 0
+            while retries < max_retries:
+                try:
+                    return func(*args, **kwargs)
+                except Exception as e:
+                    retries += 1
+                    if retries == max_retries:
+                        raise e
+                    time.sleep(delay * retries)  # 指數退避
+            return None
+        return wrapper
+    return decorator
+
+# 獲取隨機用戶代理
+def get_random_user_agent():
+    return random.choice(USER_AGENTS)
 
 
 # 截斷文件名過長的問題
@@ -179,75 +211,135 @@ def index():
 
 
 @app.route('/get_video_info', methods=['POST'])
+@retry_on_error(max_retries=3)
 def get_video_info():
     data = request.get_json()
     url = data.get('url')
+
+    if not url:
+        return jsonify({'error': 'URL is required'}), 400
 
     try:
         ydl_opts = {
             'format': 'bestaudio/best',
             'noplaylist': True,
+            'quiet': True,
+            'no_warnings': True,
+            'extract_flat': True,
+            'headers': {
+                'User-Agent': get_random_user_agent(),
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                'Accept-Language': 'en-US,en;q=0.5',
+                'Accept-Encoding': 'gzip, deflate',
+                'DNT': '1',
+                'Connection': 'keep-alive',
+            }
         }
 
         with YoutubeDL(ydl_opts) as ydl:
             info_dict = ydl.extract_info(url, download=False)
+            if not info_dict:
+                return jsonify({'error': 'Could not fetch video information'}), 400
+            
             duration = info_dict.get('duration', 0)  # 影片時長（秒）
+            if not duration:
+                return jsonify({'error': 'Could not get video duration'}), 400
 
         duration_str = seconds_to_time(duration)
         return jsonify({'duration': duration_str})
 
     except Exception as e:
-        return jsonify({'error': str(e)})
+        return jsonify({'error': str(e)}), 500
 
 
 @app.route('/download', methods=['POST'])
+@retry_on_error(max_retries=3)
 def download():
-    url = request.form['url']
-    start_time = request.form['start_time']
-    end_time = request.form['end_time']
+    url = request.form.get('url')
+    start_time = request.form.get('start_time', '00:00:00')
+    end_time = request.form.get('end_time', '')
+
+    if not url:
+        return "URL is required", 400
 
     try:
         ydl_opts = {
             'format': 'bestaudio/best',
             'outtmpl': os.path.join(DOWNLOAD_FOLDER, 'one.%(ext)s'),
             'noplaylist': True,
+            'quiet': True,
+            'no_warnings': True,
+            'headers': {
+                'User-Agent': get_random_user_agent(),
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                'Accept-Language': 'en-US,en;q=0.5',
+                'Accept-Encoding': 'gzip, deflate',
+                'DNT': '1',
+                'Connection': 'keep-alive',
+            }
         }
+
+        # 確保下載目錄存在
+        if not os.path.exists(DOWNLOAD_FOLDER):
+            os.makedirs(DOWNLOAD_FOLDER)
 
         with YoutubeDL(ydl_opts) as ydl:
             info_dict = ydl.extract_info(url, download=True)
+            if not info_dict:
+                return "Could not download video", 400
+                
             title = sanitize_filename(info_dict.get('title', 'video'))
             thumbnail_url = info_dict.get('thumbnail', None)
             uploader = info_dict.get('uploader', "Unknown Artist")
             original_audio_file = os.path.join(DOWNLOAD_FOLDER, "one.webm")
             output_mp3_file = os.path.join(DOWNLOAD_FOLDER, f"{title}.mp3")
-            thumbnail_file = os.path.join(DOWNLOAD_FOLDER,
-                                          f"{title}_thumb.jpg")
+            thumbnail_file = os.path.join(DOWNLOAD_FOLDER, f"{title}_thumb.jpg")
+
+            if not os.path.exists(original_audio_file):
+                return "Download failed", 400
 
         # 下載縮略圖
         if thumbnail_url:
-            download_thumbnail(thumbnail_url, thumbnail_file)
+            try:
+                download_thumbnail(thumbnail_url, thumbnail_file)
+            except Exception as e:
+                print(f"Thumbnail download failed: {e}")
+                # 繼續執行，縮略圖不是必需的
 
-        # 使用 FFmpeg 剪輯指定時間範圍，並將縮略圖作為封面
-        ffmpeg_audio_command = f'ffmpeg -y -i "{original_audio_file}" -ss {start_time} -to {end_time} -vn -c:a libmp3lame -b:a 192k -metadata artist="{uploader}" "{output_mp3_file}"'
-        subprocess.run(ffmpeg_audio_command, shell=True, check=True)
+        try:
+            # 使用 FFmpeg 剪輯指定時間範圍，並將縮略圖作為封面
+            ffmpeg_audio_command = f'ffmpeg -y -i "{original_audio_file}" -ss {start_time} -to {end_time} -vn -c:a libmp3lame -b:a 192k -metadata artist="{uploader}" "{output_mp3_file}"'
+            subprocess.run(ffmpeg_audio_command, shell=True, check=True)
 
-        # 嵌入封面到 MP3
-        temp_mp3_file = os.path.join(DOWNLOAD_FOLDER, "temp.mp3")
-        ffmpeg_cover_command = f'ffmpeg -y -i "{output_mp3_file}" -i "{thumbnail_file}" -map 0:a -map 1 -c:a copy -c:v mjpeg -id3v2_version 3 -metadata:s:v title="Album cover" -metadata:s:v comment="Cover (front)" "{temp_mp3_file}"'
-        subprocess.run(ffmpeg_cover_command, shell=True, check=True)
+            # 如果有縮略圖，嵌入到 MP3
+            if os.path.exists(thumbnail_file):
+                temp_mp3_file = os.path.join(DOWNLOAD_FOLDER, "temp.mp3")
+                ffmpeg_cover_command = f'ffmpeg -y -i "{output_mp3_file}" -i "{thumbnail_file}" -map 0:a -map 1 -c:a copy -c:v mjpeg -id3v2_version 3 -metadata:s:v title="Album cover" -metadata:s:v comment="Cover (front)" "{temp_mp3_file}"'
+                subprocess.run(ffmpeg_cover_command, shell=True, check=True)
+                os.replace(temp_mp3_file, output_mp3_file)
 
-        # 將臨時文件覆蓋原始 MP3 文件
-        os.replace(temp_mp3_file, output_mp3_file)
+            # 傳送文件
+            if os.path.exists(output_mp3_file):
+                response = send_file(output_mp3_file, as_attachment=True)
+                clear_download_folder(DOWNLOAD_FOLDER)
+                return response
+            else:
+                return "MP3 conversion failed", 500
 
-        # 傳送文件後清理資料夾
-        response = send_file(output_mp3_file, as_attachment=True)
-        clear_download_folder(DOWNLOAD_FOLDER)
-        return response
+        except subprocess.CalledProcessError as ffmpeg_error:
+            return f"Error while processing audio with FFmpeg: {str(ffmpeg_error)}", 500
+        except Exception as e:
+            return f"Error: {str(e)}", 500
 
-    except subprocess.CalledProcessError as ffmpeg_error:
-        return f"Error while processing audio with FFmpeg: {str(ffmpeg_error)}"
     except Exception as e:
-        return f"Error: {str(e)}"
+        return f"Error: {str(e)}", 500
+
+    finally:
+        # 確保清理臨時文件
+        try:
+            clear_download_folder(DOWNLOAD_FOLDER)
+        except:
+            pass
 
 
 if __name__ == '__main__':
