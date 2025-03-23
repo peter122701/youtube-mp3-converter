@@ -24,6 +24,26 @@ USER_AGENTS = [
     'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.3.1 Safari/605.1.15'
 ]
 
+# 添加更多请求头
+HEADERS = {
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+    'Accept-Language': 'en-US,en;q=0.5',
+    'Accept-Encoding': 'gzip, deflate, br',
+    'DNT': '1',
+    'Connection': 'keep-alive',
+    'Upgrade-Insecure-Requests': '1',
+    'Sec-Fetch-Dest': 'document',
+    'Sec-Fetch-Mode': 'navigate',
+    'Sec-Fetch-Site': 'none',
+    'Sec-Fetch-User': '?1',
+    'TE': 'trailers'
+}
+
+def get_headers():
+    headers = HEADERS.copy()
+    headers['User-Agent'] = get_random_user_agent()
+    return headers
+
 def retry_on_error(max_retries=3, delay=1):
     def decorator(func):
         @wraps(func)
@@ -226,14 +246,15 @@ def get_video_info():
             'quiet': True,
             'no_warnings': True,
             'extract_flat': True,
-            'headers': {
-                'User-Agent': get_random_user_agent(),
-                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-                'Accept-Language': 'en-US,en;q=0.5',
-                'Accept-Encoding': 'gzip, deflate',
-                'DNT': '1',
-                'Connection': 'keep-alive',
-            }
+            'nocheckcertificate': True,
+            'ignoreerrors': False,
+            'logtostderr': False,
+            'no_color': True,
+            'http_headers': get_headers(),
+            'socket_timeout': 10,
+            'retries': 3,
+            'extractor_retries': 3,
+            'fragment_retries': 3
         }
 
         with YoutubeDL(ydl_opts) as ydl:
@@ -269,14 +290,17 @@ def download():
             'noplaylist': True,
             'quiet': True,
             'no_warnings': True,
-            'headers': {
-                'User-Agent': get_random_user_agent(),
-                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-                'Accept-Language': 'en-US,en;q=0.5',
-                'Accept-Encoding': 'gzip, deflate',
-                'DNT': '1',
-                'Connection': 'keep-alive',
-            }
+            'nocheckcertificate': True,
+            'ignoreerrors': False,
+            'logtostderr': False,
+            'no_color': True,
+            'http_headers': get_headers(),
+            'socket_timeout': 10,
+            'retries': 3,
+            'extractor_retries': 3,
+            'fragment_retries': 3,
+            'external_downloader': 'aria2c',
+            'external_downloader_args': ['--min-split-size=1M', '--max-connection-per-server=16']
         }
 
         # 確保下載目錄存在
@@ -284,9 +308,16 @@ def download():
             os.makedirs(DOWNLOAD_FOLDER)
 
         with YoutubeDL(ydl_opts) as ydl:
-            info_dict = ydl.extract_info(url, download=True)
+            # 先获取信息而不下载
+            info_dict = ydl.extract_info(url, download=False)
             if not info_dict:
-                return "Could not download video", 400
+                return "Could not get video information", 400
+
+            # 使用不同的选项进行下载
+            download_opts = ydl_opts.copy()
+            download_opts['format'] = 'bestaudio/best'
+            with YoutubeDL(download_opts) as ydl_download:
+                info_dict = ydl_download.extract_info(url, download=True)
                 
             title = sanitize_filename(info_dict.get('title', 'video'))
             thumbnail_url = info_dict.get('thumbnail', None)

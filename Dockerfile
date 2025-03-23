@@ -1,8 +1,8 @@
 FROM python:3.9-slim
 
-# 安装 FFmpeg
+# 安装 FFmpeg 和 aria2
 RUN apt-get update && \
-    apt-get install -y ffmpeg && \
+    apt-get install -y ffmpeg aria2 && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
